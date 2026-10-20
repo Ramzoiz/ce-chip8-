@@ -1,0 +1,224 @@
+// CHIP-8: una piccola macchina virtuale a 8 bit (35 istruzioni), scritta in Ce++.
+// Memoria 4 KiB, 16 registri V0..VF, schermo 64x32 a un bit per pixel, pila da 16 livelli.
+usa "@file.ce";
+
+costante LARG: dimensione = 64;
+costante ALT: dimensione = 32;
+costante INIZIO_PROGRAMMA: dimensione = 512;       // 0x200
+costante INIZIO_FONT: dimensione = 80;             // 0x50
+
+variabile memoria: [byte; 4096];
+variabile reg: [byte; 16];
+variabile indice: naturale16;
+variabile pc: naturale16;
+variabile pila: [naturale16; 16];
+variabile sp: dimensione;
+variabile schermo: [byte; 2048];
+variabile ritardo: byte;
+variabile suono: byte;
+variabile tasti: [byte; 16];
+variabile seme: naturale32 = 2463534242;
+variabile fermo: booleano;
+
+// ---------- preparazione ----------
+funzione carica_font() {
+    costante font: [byte; 80] = [
+        0xF0, 0x90, 0x90, 0x90, 0xF0,  0x20, 0x60, 0x20, 0x20, 0x70,
+        0xF0, 0x10, 0xF0, 0x80, 0xF0,  0xF0, 0x10, 0xF0, 0x10, 0xF0,
+        0x90, 0x90, 0xF0, 0x10, 0x10,  0xF0, 0x80, 0xF0, 0x10, 0xF0,
+        0xF0, 0x80, 0xF0, 0x90, 0xF0,  0xF0, 0x10, 0x20, 0x40, 0x40,
+        0xF0, 0x90, 0xF0, 0x90, 0xF0,  0xF0, 0x90, 0xF0, 0x10, 0xF0,
+        0xF0, 0x90, 0xF0, 0x90, 0x90,  0xE0, 0x90, 0xE0, 0x90, 0xE0,
+        0xF0, 0x80, 0x80, 0x80, 0xF0,  0xE0, 0x90, 0x90, 0x90, 0xE0,
+        0xF0, 0x80, 0xF0, 0x80, 0xF0,  0xF0, 0x80, 0xF0, 0x80, 0x80,
+    ];
+    per i: dimensione in 0..80 { memoria[INIZIO_FONT + i] = font[i]; }
+}
+
+// Mette la macchina allo stato iniziale e copia il programma da 0x200.
+funzione avvia(programma: [byte]) -> Risultato<booleano, testo> {
+    se programma.lunghezza > 4096 - INIZIO_PROGRAMMA {
+        ritorna male("il programma e' troppo grande (massimo 3584 byte)");
+    }
+    per i: dimensione in 0..4096 { memoria[i] = 0; }
+    per i: dimensione in 0..16 { reg[i] = 0; pila[i] = 0; tasti[i] = 0; }
+    per i: dimensione in 0..2048 { schermo[i] = 0; }
+    carica_font();
+    per i: dimensione in 0..programma.lunghezza { memoria[INIZIO_PROGRAMMA + i] = programma[i]; }
+    indice = 0;
+    pc = 512;
+    sp = 0;
+    ritardo = 0;
+    suono = 0;
+    fermo = falso;
+    ritorna bene(vero);
+}
+
+funzione numero_casuale() -> byte {
+    seme = seme ^ (seme << 13);
+    seme = seme ^ (seme >> 17);
+    seme = seme ^ (seme << 5);
+    ritorna (seme & 255) come byte;
+}
+
+// ---------- schermo ----------
+funzione pulisci_schermo() {
+    per i: dimensione in 0..2048 { schermo[i] = 0; }
+}
+
+// Disegna lo sprite di 'altezza' righe che parte da memoria[indice] in (x0, y0).
+// VF = 1 se si spegne almeno un pixel acceso.
+funzione disegna(x0: dimensione, y0: dimensione, altezza: dimensione) {
+    reg[15] = 0;
+    per riga: dimensione in 0..altezza {
+        costante y: dimensione = (y0 % ALT) + riga;
+        se y >= ALT { interrompi; }
+        costante bits: byte = memoria[((indice come dimensione) + riga) % 4096];
+        per colonna: dimensione in 0..8 {
+            costante x: dimensione = (x0 % LARG) + colonna;
+            se x >= LARG { interrompi; }
+            se ((bits >> (7 - colonna) come byte) & 1) == 1 {
+                costante p: dimensione = y * LARG + x;
+                se schermo[p] == 1 { reg[15] = 1; }
+                schermo[p] = schermo[p] ^ 1;
+            }
+        }
+    }
+}
+
+funzione mostra_schermo() {
+    per y: dimensione in 0..ALT {
+        per x: dimensione in 0..LARG {
+            se schermo[y * LARG + x] == 1 { scrivi("#"); } altrimenti { scrivi("."); }
+        }
+        stampa("");
+    }
+}
+
+// ---------- una istruzione ----------
+funzione passo() -> Risultato<booleano, testo> {
+    se (pc come dimensione) + 1 >= 4096 { ritorna male("il contatore di programma e' fuori dalla memoria"); }
+    costante op: naturale16 = ((memoria[pc come dimensione] come naturale16) << 8)
+                              | (memoria[(pc come dimensione) + 1] come naturale16);
+    pc += 2;
+    costante x: dimensione = ((op >> 8) & 15) come dimensione;
+    costante y: dimensione = ((op >> 4) & 15) come dimensione;
+    costante n: byte = (op & 15) come byte;
+    costante kk: byte = (op & 255) come byte;
+    costante nnn: naturale16 = op & 4095;
+
+    scegli op >> 12 {
+        caso 0 {
+            scegli op {
+                caso 224 { pulisci_schermo(); }                       // 00E0
+                caso 238 {                                            // 00EE
+                    se sp == 0 { ritorna male("ritorno con la pila vuota"); }
+                    sp -= 1;
+                    pc = pila[sp];
+                }
+                altrimenti { }
+            }
+        }
+        caso 1 { pc = nnn; }
+        caso 2 {
+            se sp >= 16 { ritorna male("pila piena"); }
+            pila[sp] = pc;
+            sp += 1;
+            pc = nnn;
+        }
+        caso 3 { se reg[x] == kk { pc += 2; } }
+        caso 4 { se reg[x] != kk { pc += 2; } }
+        caso 5 { se reg[x] == reg[y] { pc += 2; } }
+        caso 6 { reg[x] = kk; }
+        caso 7 { reg[x] = reg[x] + kk; }
+        caso 8 {
+            costante a: byte = reg[x];
+            costante b: byte = reg[y];
+            scegli n {
+                caso 0 { reg[x] = b; }
+                caso 1 { reg[x] = a | b; }
+                caso 2 { reg[x] = a & b; }
+                caso 3 { reg[x] = a ^ b; }
+                caso 4 {
+                    costante somma: naturale16 = (a come naturale16) + (b come naturale16);
+                    reg[x] = (somma & 255) come byte;
+                    reg[15] = se_vale(somma > 255);
+                }
+                caso 5 { reg[x] = a - b; reg[15] = se_vale(a >= b); }
+                caso 6 { reg[x] = a >> 1; reg[15] = a & 1; }
+                caso 7 { reg[x] = b - a; reg[15] = se_vale(b >= a); }
+                caso 14 { reg[x] = a << 1; reg[15] = a >> 7; }
+                altrimenti { ritorna male("istruzione 8xy sconosciuta"); }
+            }
+        }
+        caso 9 { se reg[x] != reg[y] { pc += 2; } }
+        caso 10 { indice = nnn; }
+        caso 11 { pc = nnn + (reg[0] come naturale16); }
+        caso 12 { reg[x] = numero_casuale() & kk; }
+        caso 13 { disegna(reg[x] come dimensione, reg[y] come dimensione, n come dimensione); }
+        caso 14 {
+            costante k: dimensione = (reg[x] & 15) come dimensione;
+            scegli kk {
+                caso 158 { se tasti[k] == 1 { pc += 2; } }          // EX9E
+                caso 161 { se tasti[k] == 0 { pc += 2; } }          // EXA1
+                altrimenti { ritorna male("istruzione Ex sconosciuta"); }
+            }
+        }
+        altrimenti {
+            scegli kk {
+                caso 7 { reg[x] = ritardo; }
+                caso 10 {                                           // FX0A: aspetta un tasto
+                    variabile premuto: booleano = falso;
+                    per t: dimensione in 0..16 {
+                        se tasti[t] == 1 { reg[x] = t come byte; premuto = vero; }
+                    }
+                    se !premuto { pc -= 2; }
+                }
+                caso 21 { ritardo = reg[x]; }
+                caso 24 { suono = reg[x]; }
+                caso 30 { indice = indice + (reg[x] come naturale16); }
+                caso 41 { indice = (INIZIO_FONT come naturale16) + ((reg[x] & 15) come naturale16) * 5; }
+                caso 51 {
+                    se (indice come dimensione) + 2 >= 4096 { ritorna male("BCD fuori dalla memoria"); }
+                    costante valore: byte = reg[x];
+                    memoria[indice come dimensione] = valore / 100;
+                    memoria[(indice come dimensione) + 1] = (valore / 10) % 10;
+                    memoria[(indice come dimensione) + 2] = valore % 10;
+                }
+                caso 85 {
+                    se (indice come dimensione) + x >= 4096 { ritorna male("salvataggio fuori dalla memoria"); }
+                    per i: dimensione in 0..(x + 1) { memoria[(indice come dimensione) + i] = reg[i]; }
+                }
+                caso 101 {
+                    se (indice come dimensione) + x >= 4096 { ritorna male("caricamento fuori dalla memoria"); }
+                    per i: dimensione in 0..(x + 1) { reg[i] = memoria[(indice come dimensione) + i]; }
+                }
+                altrimenti { ritorna male("istruzione Fx sconosciuta"); }
+            }
+        }
+    }
+    ritorna bene(vero);
+}
+
+funzione se_vale(c: booleano) -> byte {
+    se c { ritorna 1; }
+    ritorna 0;
+}
+
+// Un "tick" a 60 Hz: fa scendere i due contatori.
+funzione tick() {
+    se ritardo > 0 { ritardo -= 1; }
+    se suono > 0 { suono -= 1; }
+}
+
+// Esegue 'cicli' istruzioni (con un tick ogni 10). Ritorna il numero di istruzioni fatte.
+funzione esegui(cicli: naturale64) -> Risultato<naturale64, testo> {
+    variabile fatti: naturale64 = 0;
+    mentre fatti < cicli {
+        costante r: Risultato<booleano, testo> = passo();
+        se !r.riuscito { ritorna male(r.errore); }
+        fatti += 1;
+        se fatti % 10 == 0 { tick(); }
+    }
+    ritorna bene(fatti);
+}

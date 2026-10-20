@@ -1,0 +1,145 @@
+// Terminale: schermo a caratteri (ANSI) e tastiera senza premere Invio, solo Linux/Mac.
+// Usa le funzioni C di <termios.h> e <unistd.h> tramite 'esterna' dentro 'rischio'.
+usa "@testo.ce";
+usa "chip8.ce";
+
+esterna funzione isatty(fd: intero) -> intero;
+esterna funzione tcgetattr(fd: intero, t: *byte) -> intero;
+esterna funzione tcsetattr(fd: intero, azione: intero, t: *byte) -> intero;
+esterna funzione read(fd: intero, dst: *byte, n: dimensione) -> lungo;
+esterna funzione usleep(microsecondi: naturale32) -> intero;
+esterna funzione fflush(f: *byte) -> intero;
+
+variabile originale: [byte; 128];
+variabile modificata: [byte; 128];
+variabile terminale_vero: booleano;
+variabile tenuti: [byte; 16];            // quanti frame ancora "premuto" per ogni tasto
+
+// Disposizione di 'struct termios' su Linux: c_lflag a 12, c_cc a 17 (VTIME = 5, VMIN = 6).
+costante OFFSET_LFLAG: dimensione = 12;
+costante OFFSET_CC: dimensione = 17;
+
+funzione inizia_terminale() {
+    rischio {
+        terminale_vero = isatty(0) == 1;
+        se terminale_vero {
+            tcgetattr(0, &originale[0]);
+            per i: dimensione in 0..128 { modificata[i] = originale[i]; }
+            // spegne ICANON (2), ECHO (8) e ISIG (1); read() ritorna subito anche senza tasti
+            modificata[OFFSET_LFLAG] = modificata[OFFSET_LFLAG] & 244;
+            modificata[OFFSET_CC + 5] = 0;
+            modificata[OFFSET_CC + 6] = 0;
+            tcsetattr(0, 0, &modificata[0]);
+        }
+    }
+    scrivi_comando("\n\n");          // lascia un po' di spazio
+}
+
+funzione ripristina_terminale() {
+    rischio {
+        se terminale_vero { tcsetattr(0, 0, &originale[0]); }
+    }
+}
+
+funzione scrivi_comando(t: testo) {
+    scrivi(t);
+}
+
+// Tasto CHIP-8 (0..15) per un carattere della tastiera, oppure 16 se non e' uno dei 16 tasti.
+//   1 2 3 4        1 2 3 C
+//   q w e r   -->  4 5 6 D
+//   a s d f        7 8 9 E
+//   z x c v        A 0 B F
+funzione tasto_da_carattere(c: byte) -> dimensione {
+    scegli c {
+        caso 49 { ritorna 1; }   // '1'
+        caso 50 { ritorna 2; }   // '2'
+        caso 51 { ritorna 3; }   // '3'
+        caso 52 { ritorna 12; }  // '4'
+        caso 113 { ritorna 4; }  // 'q'
+        caso 119 { ritorna 5; }  // 'w'
+        caso 101 { ritorna 6; }  // 'e'
+        caso 114 { ritorna 13; } // 'r'
+        caso 97 { ritorna 7; }   // 'a'
+        caso 115 { ritorna 8; }  // 's'
+        caso 100 { ritorna 9; }  // 'd'
+        caso 102 { ritorna 14; } // 'f'
+        caso 122 { ritorna 10; } // 'z'
+        caso 120 { ritorna 0; }  // 'x'
+        caso 99 { ritorna 11; }  // 'c'
+        caso 118 { ritorna 15; } // 'v'
+        altrimenti { ritorna 16; }
+    }
+}
+
+// Legge i tasti premuti dall'ultimo giro. Ritorna vero se bisogna uscire (Ctrl-C o Esc).
+funzione leggi_tastiera() -> booleano {
+    variabile esci: booleano = falso;
+    se terminale_vero {
+        variabile buf: [byte; 32];
+        variabile n: lungo = 0;
+        rischio { n = read(0, &buf[0], 32); }
+        per i: dimensione in 0..(n.max0() come dimensione) {
+            se buf[i] == 3 || buf[i] == 27 { esci = vero; }
+            costante k: dimensione = tasto_da_carattere(buf[i]);
+            se k < 16 { tenuti[k] = 6; }
+        }
+    }
+    per k: dimensione in 0..16 {
+        se tenuti[k] > 0 {
+            tasti[k] = 1;
+            tenuti[k] -= 1;
+        } altrimenti {
+            tasti[k] = 0;
+        }
+    }
+    ritorna esci;
+}
+
+funzione max0(n: lungo) -> lungo {
+    se n < 0 { ritorna 0; }
+    ritorna n;
+}
+
+// Disegna lo schermo con mezzi blocchi: ogni carattere mostra due righe di pixel.
+funzione disegna_terminale() {
+    variabile f: Stringa = nuova_stringa();
+    f.aggiungi_byte(27);
+    f.aggiungi_testo("[H");
+    per y: dimensione in 0..16 {
+        per x: dimensione in 0..LARG {
+            costante alto: byte = schermo[(2 * y) * LARG + x];
+            costante basso: byte = schermo[(2 * y + 1) * LARG + x];
+            se alto == 1 && basso == 1 { f.aggiungi_testo("█"); }
+            altrimenti se alto == 1 { f.aggiungi_testo("▀"); }
+            altrimenti se basso == 1 { f.aggiungi_testo("▄"); }
+            altrimenti { f.aggiungi_testo(" "); }
+        }
+        f.aggiungi_byte(10);
+    }
+    scrivi(f.come_testo());
+    f.libera_stringa();
+    rischio { fflush((0 come dimensione) come *byte); }
+}
+
+// Gira finche' non premi Esc o Ctrl-C. Circa 600 istruzioni al secondo, 60 immagini al secondo.
+// 'fotogrammi' = quante immagini al massimo (0 = senza limite).
+funzione gioca_terminale(fotogrammi: naturale64) -> Risultato<booleano, testo> {
+    inizia_terminale();
+    variabile fatti: naturale64 = 0;
+    variabile esito: Risultato<booleano, testo> = bene(vero);
+    mentre vero {
+        se leggi_tastiera() { interrompi; }
+        se fotogrammi > 0 && fatti >= fotogrammi { interrompi; }
+        fatti += 1;
+        costante r: Risultato<naturale64, testo> = esegui(10);
+        se !r.riuscito {
+            esito = male(r.errore);
+            interrompi;
+        }
+        disegna_terminale();
+        rischio { usleep(16000); }
+    }
+    ripristina_terminale();
+    ritorna esito;
+}

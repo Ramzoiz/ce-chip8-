@@ -1,0 +1,54 @@
+// Emulatore CHIP-8 in Ce++.
+//   ./ce esegui src/principale.ce -- prova  programma.ch8 [cicli]   stampa lo schermo dopo N istruzioni
+//   ./ce esegui src/principale.ce -- gioca  programma.ch8 [immagini] gioca nel terminale (Esc per uscire)
+usa "terminale.ce";
+
+funzione numero_da_argomento(t: testo, standard: naturale64) -> naturale64 {
+    costante r: Risultato<lungo, testo> = numero_da_testo(t);
+    se !r.riuscito || r.valore < 0 { ritorna standard; }
+    ritorna r.valore come naturale64;
+}
+
+funzione uso() -> intero {
+    stampa("uso: principale prova|gioca programma.ch8 [cicli]");
+    ritorna 2;
+}
+
+funzione principale() -> intero {
+    se numero_argomenti() < 3 { ritorna uso(); }
+    costante modo: testo = argomento(1);
+    costante rom: Risultato<[byte], testo> = leggi_file(argomento(2));
+    se !rom.riuscito {
+        stampa("errore: ", rom.errore);
+        ritorna 1;
+    }
+    costante a: Risultato<booleano, testo> = avvia(rom.valore);
+    variabile copia_rom: [byte] = rom.valore;
+    rischio { libera(copia_rom); }
+    se !a.riuscito {
+        stampa("errore: ", a.errore);
+        ritorna 1;
+    }
+    se testo_uguale(modo, "prova") {
+        variabile cicli: naturale64 = 2000;
+        se numero_argomenti() > 3 { cicli = numero_da_argomento(argomento(3), 2000); }
+        costante r: Risultato<naturale64, testo> = esegui(cicli);
+        mostra_schermo();
+        se !r.riuscito {
+            stampa("errore a pc=", pc, ": ", r.errore);
+            ritorna 1;
+        }
+        ritorna 0;
+    }
+    se testo_uguale(modo, "gioca") {
+        variabile quanti: naturale64 = 0;
+        se numero_argomenti() > 3 { quanti = numero_da_argomento(argomento(3), 0); }
+        costante g: Risultato<booleano, testo> = gioca_terminale(quanti);
+        se !g.riuscito {
+            stampa("errore a pc=", pc, ": ", g.errore);
+            ritorna 1;
+        }
+        ritorna 0;
+    }
+    ritorna uso();
+}

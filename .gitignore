@@ -1,0 +1,6 @@
+.compilatore
+roms/
+__pycache__/
+*.c
+a.out
+chip8_prova

@@ -1,0 +1,143 @@
+// Finestra grafica con SDL2 (serve libsdl2 e uno schermo: sul tuo computer, non in un Codespace).
+//   ./ce esegui src/finestra.ce -l SDL2 programma.ch8 [immagini]
+// Non servono header: le funzioni SDL sono dichiarate qui sotto con 'esterna'.
+usa "@file.ce";
+usa "@testo.ce";
+usa "chip8.ce";
+
+esterna funzione SDL_Init(flags: naturale32) -> intero;
+esterna funzione SDL_Quit();
+esterna funzione SDL_CreateWindow(titolo: *byte, x: intero, y: intero, l: intero, a: intero, flags: naturale32) -> *byte;
+esterna funzione SDL_DestroyWindow(w: *byte);
+esterna funzione SDL_CreateRenderer(w: *byte, indice: intero, flags: naturale32) -> *byte;
+esterna funzione SDL_DestroyRenderer(r: *byte);
+esterna funzione SDL_SetRenderDrawColor(r: *byte, rosso: byte, verde: byte, blu: byte, alfa: byte) -> intero;
+esterna funzione SDL_RenderClear(r: *byte) -> intero;
+esterna funzione SDL_RenderFillRect(r: *byte, rettangolo: *intero) -> intero;
+esterna funzione SDL_RenderPresent(r: *byte);
+esterna funzione SDL_PollEvent(evento: *byte) -> intero;
+esterna funzione SDL_Delay(ms: naturale32);
+
+costante SDL_INIT_VIDEO: naturale32 = 32;
+costante EVENTO_USCITA: naturale32 = 256;        // 0x100
+costante EVENTO_TASTO_GIU: naturale32 = 768;     // 0x300
+costante EVENTO_TASTO_SU: naturale32 = 769;      // 0x301
+costante INGRANDIMENTO: intero = 12;
+
+// Il codice SDL del tasto (keysym) per ogni lettera della tastiera in alto a sinistra.
+funzione tasto_chip8(codice: naturale32) -> dimensione {
+    scegli codice {
+        caso 49 { ritorna 1; }    // 1
+        caso 50 { ritorna 2; }    // 2
+        caso 51 { ritorna 3; }    // 3
+        caso 52 { ritorna 12; }   // 4
+        caso 113 { ritorna 4; }   // q
+        caso 119 { ritorna 5; }   // w
+        caso 101 { ritorna 6; }   // e
+        caso 114 { ritorna 13; }  // r
+        caso 97 { ritorna 7; }    // a
+        caso 115 { ritorna 8; }   // s
+        caso 100 { ritorna 9; }   // d
+        caso 102 { ritorna 14; }  // f
+        caso 122 { ritorna 10; }  // z
+        caso 120 { ritorna 0; }   // x
+        caso 99 { ritorna 11; }   // c
+        caso 118 { ritorna 15; }  // v
+        altrimenti { ritorna 16; }
+    }
+}
+
+funzione principale() -> intero {
+    se numero_argomenti() < 2 {
+        stampa("uso: finestra programma.ch8");
+        ritorna 2;
+    }
+    costante rom: Risultato<[byte], testo> = leggi_file(argomento(1));
+    se !rom.riuscito {
+        stampa("errore: ", rom.errore);
+        ritorna 1;
+    }
+    costante a: Risultato<booleano, testo> = avvia(rom.valore);
+    variabile copia_rom: [byte] = rom.valore;
+    rischio { libera(copia_rom); }
+    se !a.riuscito {
+        stampa("errore: ", a.errore);
+        ritorna 1;
+    }
+    variabile titolo: [byte; 8] = [67, 72, 73, 80, 45, 56, 0, 0];       // "CHIP-8"
+    variabile evento: [byte; 64];
+    variabile rett: [intero; 4];
+    variabile finestra: *byte;
+    variabile pennello: *byte;
+    rischio {
+        se SDL_Init(SDL_INIT_VIDEO) != 0 {
+            stampa("errore: SDL non parte");
+            ritorna 1;
+        }
+        finestra = SDL_CreateWindow(&titolo[0], 100, 100, 64 * INGRANDIMENTO, 32 * INGRANDIMENTO, 4);
+        pennello = SDL_CreateRenderer(finestra, -1, 2);
+    }
+    variabile massimo: naturale64 = 0;
+    variabile fatti: naturale64 = 0;
+    se numero_argomenti() > 2 {
+        costante q: Risultato<lungo, testo> = numero_da_testo(argomento(2));
+        se q.riuscito && q.valore > 0 { massimo = q.valore come naturale64; }
+    }
+    variabile attivo: booleano = vero;
+    variabile errore: testo = "";
+    mentre attivo {
+        variabile ev: intero = 1;
+        mentre ev != 0 {
+            rischio { ev = SDL_PollEvent(&evento[0]); }
+            se ev != 0 {
+                costante tipo: naturale32 = (evento[0] come naturale32) | ((evento[1] come naturale32) << 8)
+                                          | ((evento[2] come naturale32) << 16) | ((evento[3] come naturale32) << 24);
+                se tipo == EVENTO_USCITA { attivo = falso; }
+                se tipo == EVENTO_TASTO_GIU || tipo == EVENTO_TASTO_SU {
+                    // SDL_KeyboardEvent: il keysym.sym sta a 20 byte dall'inizio
+                    costante sym: naturale32 = (evento[20] come naturale32) | ((evento[21] come naturale32) << 8);
+                    costante k: dimensione = tasto_chip8(sym);
+                    se k < 16 {
+                        se tipo == EVENTO_TASTO_GIU { tasti[k] = 1; } altrimenti { tasti[k] = 0; }
+                    }
+                    se tipo == EVENTO_TASTO_GIU && sym == 27 { attivo = falso; }     // Esc
+                }
+            }
+        }
+        fatti += 1;
+        se massimo > 0 && fatti > massimo { attivo = falso; }
+        costante r: Risultato<naturale64, testo> = esegui(10);
+        se !r.riuscito {
+            errore = r.errore;
+            attivo = falso;
+        }
+        rischio {
+            SDL_SetRenderDrawColor(pennello, 20, 20, 30, 255);
+            SDL_RenderClear(pennello);
+            SDL_SetRenderDrawColor(pennello, 240, 220, 120, 255);
+            per y: dimensione in 0..ALT {
+                per x: dimensione in 0..LARG {
+                    se schermo[y * LARG + x] == 1 {
+                        rett[0] = (x come intero) * INGRANDIMENTO;
+                        rett[1] = (y come intero) * INGRANDIMENTO;
+                        rett[2] = INGRANDIMENTO;
+                        rett[3] = INGRANDIMENTO;
+                        SDL_RenderFillRect(pennello, &rett[0]);
+                    }
+                }
+            }
+            SDL_RenderPresent(pennello);
+            SDL_Delay(16);
+        }
+    }
+    rischio {
+        SDL_DestroyRenderer(pennello);
+        SDL_DestroyWindow(finestra);
+        SDL_Quit();
+    }
+    se errore.lunghezza > 0 {
+        stampa("errore a pc=", pc, ": ", errore);
+        ritorna 1;
+    }
+    ritorna 0;
+}
